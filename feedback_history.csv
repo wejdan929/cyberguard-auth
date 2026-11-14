@@ -1,0 +1,3 @@
+timestamp,failed_logins,request_frequency,payload_size,ip_reputation,actual_status,comment
+2026-11-14 20:27:52,5,15.0,2500,0.84,0,Correction automatique d'un faux positif par le client de test.
+2026-11-14 20:29:18,5,15.0,2500,0.84,0,Correction automatique d'un faux positif par le client de test.
