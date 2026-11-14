@@ -1,80 +1,73 @@
+import csv
 import os
-import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from datetime import datetime
 import joblib
+from fastapi import FastAPI
+from pydantic import BaseModel
 
+# 1. Charger le modèle Random Forest
+model = joblib.load("cyberguard_model.pkl")
+
+# 2. Initialiser l'application FastAPI
 app = FastAPI(
-    title="CyberGuard-Auth",
-    description=(
-        "API de sécurité adaptative en boucle fermée avec Random Forest, seuil"
-        " dynamique et persistance CSV."
-    ),
+    title="CyberGuard-Auth API",
+    description="Système de Sécurité Adaptatif en Boucle Fermée avec Persistance",
     version="2.2",
 )
 
-# Chargement du modèle Random Forest pré-entraîné
-model = joblib.load("cyberguard_model.pkl")
-
-# Variable globale pour le seuil adaptatif en mémoire vive (RAM)
+# Variable globale pour la boucle adaptative
 ADAPTIVE_THRESHOLD = 0.5
 
-# Fichier CSV pour la persistance durable des feedbacks
-FEEDBACK_CSV = "feedback_history.csv"
+# Nom du fichier CSV pour stocker l'historique des feedbacks
+CSV_FILE = "feedback_history.csv"
 
-# Initialisation du fichier CSV s'il n'existe pas
-if not os.path.exists(FEEDBACK_CSV):
-  df_init = pd.DataFrame(
-      columns=[
+
+# Initialiser le fichier CSV avec les en-têtes s'il n'existe pas
+def init_csv():
+  if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, mode="w", newline="", encoding="utf-8") as f:
+      writer = csv.writer(f)
+      writer.writerow([
           "timestamp",
           "failed_logins",
           "request_frequency",
           "payload_size",
           "ip_reputation",
-          "predicted_label",
           "actual_status",
           "confidence",
           "comment",
-      ]
-  )
-  df_init.to_csv(FEEDBACK_CSV, index=False)
+      ])
 
 
-class TrafficInput(BaseModel):
-  failed_logins: int = Field(
-      ..., description="Nombre d'échecs de connexion récents"
-  )
-  request_frequency: float = Field(
-      ..., description="Fréquence des requêtes par minute"
-  )
-  payload_size: int = Field(
-      ..., description="Taille de la charge utile en octets"
-  )
-  ip_reputation: float = Field(
-      ..., description="Score de réputation de l'IP (0 à 1)"
-  )
+init_csv()
 
 
-class FeedbackInput(TrafficInput):
-  actual_status: int = Field(
-      ..., description="0 = Trafic légitime (Faux positif), 1 = Vraie attaque"
-  )
-  comment: str = Field(..., description="Commentaire explicatif de l'admin")
+# Modèles de données Pydantic
+class SecurityData(BaseModel):
+  failed_logins: int
+  request_frequency: float
+  payload_size: int
+  ip_reputation: float
+
+
+class FeedbackData(SecurityData):
+  actual_status: int  # 0 = légitime (faux positif), 1 = vraie attaque
+  comment: str
 
 
 @app.get("/")
-def home():
+def read_root():
   return {
       "message": (
-          "Bienvenue sur CyberGuard-Auth v2.2 ! Boucle fermée intelligente et"
-          " CSV actifs."
+          "Bienvenue sur CyberGuard-Auth v2.2 ! Boucle fermée intelligente"
+          " active."
       ),
       "current_adaptive_threshold": ADAPTIVE_THRESHOLD,
   }
 
 
 @app.post("/predict")
-def predict_traffic(data: TrafficInput):
+def predict_traffic(data: SecurityData):
   global ADAPTIVE_THRESHOLD
 
   # Préparation des features pour le modèle
@@ -92,9 +85,10 @@ def predict_traffic(data: TrafficInput):
   # Comparaison avec le seuil adaptatif actuel
   is_attack = int(attack_probability >= ADAPTIVE_THRESHOLD)
 
+  # Format structuré et propre
   return {
-      "prediction": is_attack,  # 1 = Attaque, 0 = Normal
-      "attack_probability": round(float(attack_probability), 4),
+      "prediction": is_attack,
+      "confidence": round(float(attack_probability), 4),
       "current_adaptive_threshold": ADAPTIVE_THRESHOLD,
       "status": (
           "Alerte : Trafic suspect bloqué"
@@ -105,7 +99,7 @@ def predict_traffic(data: TrafficInput):
 
 
 @app.post("/feedback")
-def receive_feedback(feedback: FeedbackInput):
+def receive_feedback(feedback: FeedbackData):
   global ADAPTIVE_THRESHOLD
 
   # Recalcul de la probabilité pour évaluer la "confiance" du modèle lors de l'erreur
@@ -118,75 +112,80 @@ def receive_feedback(feedback: FeedbackInput):
   probabilities = model.predict_proba(features)[0]
   attack_probability = probabilities[1]
 
-  # IDÉE 1 : Pas d'adaptation intelligent basé sur la confiance du modèle
-  # Plus le modèle était sûr de lui dans l'erreur, plus la correction est proportionnelle
+  # Pas d'adaptation intelligent basé sur la confiance du modèle
   confidence_delta = abs(attack_probability - ADAPTIVE_THRESHOLD)
   dynamic_step = max(0.01, round(0.01 + (confidence_delta * 0.05), 4))
 
-  action_msg = ""
   if feedback.actual_status == 0:
-    # Faux positif : on baisse le seuil pour devenir plus tolérant
+    # Faux positif : on baisse le seuil
     ADAPTIVE_THRESHOLD = max(
         0.3, round(ADAPTIVE_THRESHOLD - dynamic_step, 4)
     )
-    action_msg = (
-        f"Faux positif enregistré. Seuil assoupli de manière dynamique de"
+    action_taken = (
+        f"Faux positif enregistré. Seuil assoupli dynamiquement de"
         f" -{dynamic_step}."
     )
   else:
-    # Vraie attaque : on remonte le seuil prudemment pour durcir la sécurité
+    # Vraie attaque : on remonte le seuil
     ADAPTIVE_THRESHOLD = min(
         0.8, round(ADAPTIVE_THRESHOLD + dynamic_step, 4)
     )
-    action_msg = (
-        f"Attaque confirmée. Seuil durci de manière dynamique de"
-        f" +{dynamic_step}."
+    action_taken = (
+        f"Attaque confirmée. Seuil durci dynamiquement de +{dynamic_step}."
     )
 
-  # Enregistrement persistant dans le fichier CSV
-  new_row = pd.DataFrame([{
-      "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-      "failed_logins": feedback.failed_logins,
-      "request_frequency": feedback.request_frequency,
-      "payload_size": feedback.payload_size,
-      "ip_reputation": feedback.ip_reputation,
-      "predicted_label": int(attack_probability >= ADAPTIVE_THRESHOLD),
-      "actual_status": feedback.actual_status,
-      "confidence": round(float(attack_probability), 4),
-      "comment": feedback.comment,
-  }])
-
-  new_row.to_csv(FEEDBACK_CSV, mode="a", header=False, index=False)
+  # Sauvegarde persistante dans le fichier CSV
+  current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow([
+        current_time,
+        feedback.failed_logins,
+        feedback.request_frequency,
+        feedback.payload_size,
+        feedback.ip_reputation,
+        feedback.actual_status,
+        round(float(attack_probability), 4),
+        feedback.comment,
+    ])
 
   return {
       "message": "Feedback pris en compte et enregistré durablement dans le CSV.",
-      "action": action_msg,
+      "action": action_taken,
       "new_adaptive_threshold": ADAPTIVE_THRESHOLD,
-      "saved_to": FEEDBACK_CSV,
+      "saved_to": CSV_FILE,
   }
 
 
-# IDÉE 2 : Endpoint de statistiques (/stats) pour analyser le fichier CSV en direct
 @app.get("/stats")
-def get_system_stats():
-  if not os.path.exists(FEEDBACK_CSV):
-    return {"total_feedbacks": 0, "false_positives": 0, "true_attacks": 0}
+def get_statistics():
+  if not os.path.exists(CSV_FILE):
+    return {
+        "total_feedbacks_recorded": 0,
+        "false_positives_corrected": 0,
+        "true_attacks_confirmed": 0,
+        "current_adaptive_threshold": ADAPTIVE_THRESHOLD,
+    }
 
-  df = pd.read_csv(FEEDBACK_CSV)
-  total_feedbacks = len(df)
+  total_feedbacks = 0
+  false_positives = 0
+  true_attacks = 0
+  latest_incident = None
 
-  if total_feedbacks == 0:
-    return {"total_feedbacks": 0, "false_positives": 0, "true_attacks": 0}
-
-  false_positives = int((df["actual_status"] == 0).sum())
-  true_attacks = int((df["actual_status"] == 1).sum())
+  with open(CSV_FILE, mode="r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+      total_feedbacks += 1
+      if int(row["actual_status"]) == 0:
+        false_positives += 1
+      else:
+        true_attacks += 1
+      latest_incident = row
 
   return {
       "total_feedbacks_recorded": total_feedbacks,
       "false_positives_corrected": false_positives,
       "true_attacks_confirmed": true_attacks,
       "current_adaptive_threshold": ADAPTIVE_THRESHOLD,
-      "latest_incident": (
-          df.iloc[-1].to_dict() if total_feedbacks > 0 else None
-      ),
+      "latest_incident": latest_incident,
   }
